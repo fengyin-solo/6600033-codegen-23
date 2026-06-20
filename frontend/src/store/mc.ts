@@ -26,7 +26,44 @@ export interface HypTestResult {
   significant: boolean
   alpha: number
   df?: number
+  interpretation?: string
+  [key: string]: any
 }
+
+export interface SampleStats {
+  count: number
+  mean: number
+  std: number
+  min: number
+  max: number
+  median: number
+  skewness: number
+  kurtosis: number
+  isDiscrete: boolean
+  isNormal: boolean
+  uniqueRatio: number
+}
+
+export interface ImportedSample {
+  name: string
+  values: number[]
+  stats: SampleStats
+}
+
+export interface RecommendedItem {
+  id: string
+  name: string
+  reason: string
+  matchScore: number
+}
+
+export interface RecommendResult {
+  samples: ImportedSample[]
+  recommendedSimulations: RecommendedItem[]
+  recommendedTests: RecommendedItem[]
+}
+
+const API_BASE = 'http://localhost:8000'
 
 function normalRandom(): number {
   let u = 0, v = 0
@@ -83,7 +120,6 @@ function runMC(scenario: MCScenario, n: number): MCResult {
     convergence.push(...samples.slice(0, 200))
     return { scenario: 'diffusion', iterations: n, estimate: Math.sqrt(x * x + y * y), samples, convergence }
   }
-  // gambler
   const { p = 0.45, bankroll = 50, goal = 100 } = scenario.params
   let ruinCount = 0
   for (let i = 0; i < n; i++) {
@@ -112,6 +148,14 @@ export const useMCStore = defineStore('mc', () => {
   const result = ref<MCResult | null>(null)
   const testResult = ref<HypTestResult | null>(null)
   const isRunning = ref(false)
+
+  const importedSamples = ref<ImportedSample[]>([])
+  const recommendResult = ref<RecommendResult | null>(null)
+  const batchTestResults = ref<HypTestResult[]>([])
+  const importError = ref<string | null>(null)
+  const isImporting = ref(false)
+  const isRecommending = ref(false)
+  const isTesting = ref(false)
 
   function runSimulation() {
     isRunning.value = true
@@ -148,5 +192,172 @@ export const useMCStore = defineStore('mc', () => {
     return { xAxis: Array.from({ length: bins }, (_, i) => Math.round((mn + i * bs) * 100) / 100), data: counts }
   })
 
-  return { currentScenario, iterations, result, testResult, isRunning, convergenceData, histogramData, runSimulation, runTest, setScenario }
+  function parseTextToSamples(text: string): { name: string; values: number[] }[] {
+    const samples: { name: string; values: number[] }[] = []
+    const lines = text.split(/\r?\n/).filter(l => l.trim())
+    if (!lines.length) return samples
+
+    const firstParts = lines[0].split(/[,;\t]/).map(p => p.trim())
+    const firstIsHeader = firstParts.some(p => isNaN(parseFloat(p)))
+
+    if (firstIsHeader && firstParts.length > 1) {
+      const cols = firstParts.length
+      const colValues: number[][] = Array.from({ length: cols }, () => [])
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(/[,;\t]/).map(p => p.trim())
+        for (let j = 0; j < cols; j++) {
+          if (j < parts.length) {
+            const v = parseFloat(parts[j])
+            if (!isNaN(v)) colValues[j].push(v)
+          }
+        }
+      }
+      for (let j = 0; j < cols; j++) {
+        if (colValues[j].length) {
+          samples.push({ name: firstParts[j] || `样本${j + 1}`, values: colValues[j] })
+        }
+      }
+    } else {
+      for (let i = 0; i < lines.length; i++) {
+        const parts = lines[i].split(/[,;\t]/).map(p => p.trim())
+        const vals: number[] = []
+        for (const p of parts) {
+          const v = parseFloat(p)
+          if (!isNaN(v)) vals.push(v)
+        }
+        if (vals.length) {
+          samples.push({ name: `样本${i + 1}`, values: vals })
+        }
+      }
+    }
+    return samples
+  }
+
+  async function importText(text: string) {
+    importError.value = null
+    isImporting.value = true
+    try {
+      const parsed = parseTextToSamples(text)
+      if (!parsed.length) throw new Error('未解析到有效数值数据')
+      const res = await fetch(`${API_BASE}/api/import/text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ samples: parsed }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || '导入失败')
+      }
+      const data = await res.json()
+      importedSamples.value = data.samples
+      recommendResult.value = null
+      batchTestResults.value = []
+    } catch (e: any) {
+      importError.value = e.message || String(e)
+    } finally {
+      isImporting.value = false
+    }
+  }
+
+  async function importFile(file: File) {
+    importError.value = null
+    isImporting.value = true
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      const res = await fetch(`${API_BASE}/api/import/file`, { method: 'POST', body: form })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || '文件解析失败')
+      }
+      const data = await res.json()
+      importedSamples.value = data.samples
+      recommendResult.value = null
+      batchTestResults.value = []
+    } catch (e: any) {
+      importError.value = e.message || String(e)
+    } finally {
+      isImporting.value = false
+    }
+  }
+
+  async function getRecommendation() {
+    if (!importedSamples.value.length) return
+    isRecommending.value = true
+    try {
+      const res = await fetch(`${API_BASE}/api/recommend`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          samples: importedSamples.value.map(s => ({ name: s.name, values: s.values })),
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || '推荐失败')
+      }
+      recommendResult.value = await res.json()
+    } catch (e: any) {
+      importError.value = e.message || String(e)
+    } finally {
+      isRecommending.value = false
+    }
+  }
+
+  async function runBatchTest(testType: string, params?: Record<string, any>) {
+    if (!importedSamples.value.length) return
+    isTesting.value = true
+    try {
+      const res = await fetch(`${API_BASE}/api/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          testType,
+          samples: importedSamples.value.map(s => ({ name: s.name, values: s.values })),
+          params,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || '检验失败')
+      }
+      const data: HypTestResult = await res.json()
+      const idx = batchTestResults.value.findIndex(r => r.testType === data.testType)
+      if (idx >= 0) batchTestResults.value[idx] = data
+      else batchTestResults.value.push(data)
+    } catch (e: any) {
+      importError.value = e.message || String(e)
+    } finally {
+      isTesting.value = false
+    }
+  }
+
+  async function runAllRecommendedTests() {
+    if (!recommendResult.value) return
+    for (const t of recommendResult.value.recommendedTests) {
+      await runBatchTest(t.id)
+    }
+  }
+
+  function clearImported() {
+    importedSamples.value = []
+    recommendResult.value = null
+    batchTestResults.value = []
+    importError.value = null
+  }
+
+  function removeSample(index: number) {
+    importedSamples.value.splice(index, 1)
+    recommendResult.value = null
+    batchTestResults.value = []
+  }
+
+  return {
+    currentScenario, iterations, result, testResult, isRunning,
+    convergenceData, histogramData, runSimulation, runTest, setScenario,
+    importedSamples, recommendResult, batchTestResults, importError,
+    isImporting, isRecommending, isTesting,
+    importText, importFile, getRecommendation, runBatchTest,
+    runAllRecommendedTests, clearImported, removeSample, parseTextToSamples,
+  }
 })
