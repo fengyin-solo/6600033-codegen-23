@@ -83,9 +83,16 @@
     </div>
 
     <div v-if="activeTab === 'import'" class="p-4">
-      <div v-if="store.importError" class="mb-4 bg-red-900/30 border border-red-700 rounded-lg px-4 py-2 text-red-400 text-sm flex justify-between items-center">
+      <div v-if="store.importError && !store.usingFallback" class="mb-4 bg-red-900/30 border border-red-700 rounded-lg px-4 py-2 text-red-400 text-sm flex justify-between items-center">
         <span>⚠ {{ store.importError }}</span>
         <button @click="store.importError = null" class="text-red-400 hover:text-red-300">×</button>
+      </div>
+      <div v-if="store.usingFallback" class="mb-4 bg-amber-900/30 border border-amber-700 rounded-lg px-4 py-2 text-amber-400 text-sm flex justify-between items-center">
+        <span>⚠ {{ store.importError || '后端不可用，已自动切换到本地解析模式（结果仅供参考）' }}</span>
+        <button @click="store.importError = null" class="text-amber-400 hover:text-amber-300">×</button>
+      </div>
+      <div v-if="store.importedSamples.length && store.backendAvailable && !store.usingFallback" class="mb-4 bg-green-900/30 border border-green-700 rounded-lg px-4 py-2 text-green-400 text-sm">
+        <span>✓ 后端服务已连接，将使用高精度统计计算</span>
       </div>
 
       <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
